@@ -27,6 +27,15 @@ function Dashboard() {
     () => JSON.parse(localStorage.getItem("tripPlan")) || []
   );
 
+  // Auth check - redirect to login if no token
+  useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      console.warn("No authentication token found. Redirecting to login.");
+      navigate("/login");
+    }
+  }, [navigate]);
+
   useEffect(() => {
     localStorage.setItem("startLocation", JSON.stringify(startLocation));
   }, [startLocation]);

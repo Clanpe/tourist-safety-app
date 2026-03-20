@@ -8,6 +8,7 @@ function Auth() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
   const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
@@ -15,17 +16,52 @@ function Auth() {
     e.preventDefault();
     setError("");
     setSuccess("");
+    setLoading(true);
+
+    // Validation
+    if (!email.trim()) {
+      setError("Email is required");
+      setLoading(false);
+      return;
+    }
+
+    if (!password.trim()) {
+      setError("Password is required");
+      setLoading(false);
+      return;
+    }
+
+    if (password.length < 6) {
+      setError("Password must be at least 6 characters");
+      setLoading(false);
+      return;
+    }
+
+    // Basic email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      setError("Please enter a valid email address");
+      setLoading(false);
+      return;
+    }
 
     const endpoint = isSignUp ? "/signup" : "/login";
 
     try {
+      console.log(`Attempting ${isSignUp ? "signup" : "login"} with email: ${email}`);
+      console.log(`API URL: ${API_BASE_URL}${endpoint}`);
+
       const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, password }),
+        headers: { 
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({ email: email.trim(), password }),
       });
 
       const data = await res.json();
+      console.log("Response:", { status: res.status, data });
 
       if (res.ok) {
         if (isSignUp) {
@@ -34,28 +70,33 @@ function Auth() {
           setIsSignUp(false);
           setEmail("");
           setPassword("");
+          setLoading(false);
         } else {
           // ✅ Login flow
           setSuccess(data.message || "Login successful!");
 
           if (data.token) {
-            localStorage.setItem("token", data.token); // Save JWT for later use
-            console.log(data.token)
+            localStorage.setItem("token", data.token);
+            console.log("Token saved:", data.token);
           }
 
-          localStorage.setItem("email", email); // <-- Save email to localStorage after login
-          console.log(email)
+          localStorage.setItem("email", email.trim());
+          console.log("Email saved:", email);
 
+          setLoading(false);
           setTimeout(() => {
-            navigate("/dashboard"); // Redirect after success
+            navigate("/dashboard");
           }, 800);
         }
       } else {
         setError(data.error || "Authentication failed");
+        setLoading(false);
+        console.error("Auth error response:", data);
       }
     } catch (err) {
-      setError("Network or server error. Please try again.");
-      console.error(err);
+      setError(`Error: ${err.message || "Network or server error. Please try again."}`);
+      setLoading(false);
+      console.error("Full error:", err);
     }
   };
 
@@ -97,11 +138,14 @@ function Auth() {
             />
             <motion.button
               type="submit"
-              className="p-3 rounded-lg font-semibold bg-blue-700 text-white shadow-lg"
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
+              disabled={loading}
+              className={`p-3 rounded-lg font-semibold text-white shadow-lg ${
+                loading ? "bg-gray-500 cursor-not-allowed" : "bg-blue-700 hover:bg-blue-800"
+              }`}
+              whileHover={!loading ? { scale: 1.05 } : {}}
+              whileTap={!loading ? { scale: 0.95 } : {}}
             >
-              {isSignUp ? "Sign Up" : "Login"}
+              {loading ? "Please wait..." : isSignUp ? "Sign Up" : "Login"}
             </motion.button>
           </form>
 

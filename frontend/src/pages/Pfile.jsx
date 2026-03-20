@@ -1,9 +1,18 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import DigitalId from "../components/User_id_profile";
 import TripPlan from "../components/trip_plan_profile";
 
 function Pfile() {
   const [activeTab, setActiveTab] = useState("digitalId");
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("email");
+    console.log("Logged out successfully");
+    navigate("/login");
+  };
 
   return (
     <div className="flex h-screen bg-gray-100">
@@ -26,6 +35,12 @@ function Pfile() {
             onClick={() => setActiveTab("tripPlan")}
           >
             Trip Plan
+          </li>
+          <li
+            className="p-3 rounded-lg cursor-pointer transition hover:bg-red-600 mt-8 border-t border-blue-700 pt-4"
+            onClick={handleLogout}
+          >
+            🚪 Logout
           </li>
         </ul>
       </div>
