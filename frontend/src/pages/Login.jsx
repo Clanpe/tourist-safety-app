@@ -10,7 +10,9 @@ function Auth() {
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
-  const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+
+  const API_BASE_URL =
+    import.meta.env.VITE_API_URL || "http://localhost:5000";
 
   const handleAuth = async (e) => {
     e.preventDefault();
@@ -18,7 +20,6 @@ function Auth() {
     setSuccess("");
     setLoading(true);
 
-    // Validation
     if (!email.trim()) {
       setError("Email is required");
       setLoading(false);
@@ -37,7 +38,6 @@ function Auth() {
       return;
     }
 
-    // Basic email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
       setError("Please enter a valid email address");
@@ -48,16 +48,20 @@ function Auth() {
     const endpoint = isSignUp ? "/signup" : "/login";
 
     try {
-      console.log(`Attempting ${isSignUp ? "signup" : "login"} with email: ${email}`);
+      console.log(
+        `Attempting ${isSignUp ? "signup" : "login"} with email: ${email}`
+      );
       console.log(`API URL: ${API_BASE_URL}${endpoint}`);
 
       const res = await fetch(`${API_BASE_URL}${endpoint}`, {
         method: "POST",
-        headers: { 
+        headers: {
           "Content-Type": "application/json",
         },
-        credentials: "include",
-        body: JSON.stringify({ email: email.trim(), password }),
+        body: JSON.stringify({
+          email: email.trim(),
+          password,
+        }),
       });
 
       const data = await res.json();
@@ -65,14 +69,12 @@ function Auth() {
 
       if (res.ok) {
         if (isSignUp) {
-          // ✅ Signup flow
           setSuccess(data.message || "Signup successful! Please login.");
           setIsSignUp(false);
           setEmail("");
           setPassword("");
           setLoading(false);
         } else {
-          // ✅ Login flow
           setSuccess(data.message || "Login successful!");
 
           if (data.token) {
@@ -84,6 +86,7 @@ function Auth() {
           console.log("Email saved:", email);
 
           setLoading(false);
+
           setTimeout(() => {
             navigate("/dashboard");
           }, 800);
@@ -94,7 +97,7 @@ function Auth() {
         console.error("Auth error response:", data);
       }
     } catch (err) {
-      setError(`Error: ${err.message || "Network or server error. Please try again."}`);
+      setError(err.message || "Network or server error. Please try again.");
       setLoading(false);
       console.error("Full error:", err);
     }
@@ -103,7 +106,6 @@ function Auth() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-r from-blue-500 to-skyblue-600">
       <div className="relative w-[800px] h-[500px] overflow-hidden rounded-2xl shadow-2xl flex">
-        {/* Sign In / Sign Up form */}
         <motion.div
           className={`absolute top-0 h-full w-1/2 flex flex-col justify-center p-8 transition-all duration-700 ${
             isSignUp
@@ -119,6 +121,7 @@ function Auth() {
           <h2 className="text-3xl font-bold text-center mb-6">
             {isSignUp ? "Create Account" : "Welcome Back"}
           </h2>
+
           <form onSubmit={handleAuth} className="flex flex-col gap-4">
             <input
               type="email"
@@ -128,6 +131,7 @@ function Auth() {
               className="p-3 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-400"
               required
             />
+
             <input
               type="password"
               value={password}
@@ -136,11 +140,14 @@ function Auth() {
               className="p-3 rounded-lg border focus:outline-none focus:ring-2 focus:ring-blue-400"
               required
             />
+
             <motion.button
               type="submit"
               disabled={loading}
               className={`p-3 rounded-lg font-semibold text-white shadow-lg ${
-                loading ? "bg-gray-500 cursor-not-allowed" : "bg-blue-700 hover:bg-blue-800"
+                loading
+                  ? "bg-gray-500 cursor-not-allowed"
+                  : "bg-blue-700 hover:bg-blue-800"
               }`}
               whileHover={!loading ? { scale: 1.05 } : {}}
               whileTap={!loading ? { scale: 0.95 } : {}}
@@ -149,7 +156,6 @@ function Auth() {
             </motion.button>
           </form>
 
-          {/* 🚨 Error Alert */}
           {error && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
@@ -161,7 +167,7 @@ function Auth() {
               ⚠️ {error}
             </motion.div>
           )}
-          {/* ✅ Success Alert */}
+
           {success && (
             <motion.div
               initial={{ opacity: 0, y: -10 }}
@@ -177,6 +183,7 @@ function Auth() {
           <div className="mt-6 text-center">
             {isSignUp ? (
               <button
+                type="button"
                 className="underline"
                 onClick={() => {
                   setIsSignUp(false);
@@ -188,6 +195,7 @@ function Auth() {
               </button>
             ) : (
               <button
+                type="button"
                 className="underline"
                 onClick={() => {
                   setIsSignUp(true);
@@ -201,7 +209,6 @@ function Auth() {
           </div>
         </motion.div>
 
-        {/* Info Card */}
         <motion.div
           className={`absolute top-0 h-full w-1/2 flex flex-col justify-center items-center p-8 transition-all duration-700 ${
             isSignUp
