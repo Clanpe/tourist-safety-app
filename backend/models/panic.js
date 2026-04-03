@@ -23,6 +23,7 @@ const LocationSchema = new mongoose.Schema({
 
 const PanicSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "DigitalId" },
+  panic_request_id: { type: String, index: true },
   email: { type: String, required: true },
   name: { type: String, required: true },
   contact_number: { type: String, required: true },
@@ -43,7 +44,45 @@ const PanicSchema = new mongoose.Schema({
     }
   ],
   panic_query: { type: String },
-  locations: [LocationSchema] // ✅ use subschema
+  delivery_source: {
+    type: String,
+    enum: ["direct", "offline_queue"],
+    default: "direct"
+  },
+  client_triggered_at: {
+    type: Date,
+    default: null
+  },
+  queued_at: {
+    type: Date,
+    default: null
+  },
+  synced_at: {
+    type: Date,
+    default: null
+  },
+  locations: [LocationSchema], // ✅ use subschema
+  status: {
+    type: String,
+    enum: ["pending", "in_progress", "resolved"],
+    default: "pending"
+  },
+  priority: {
+    type: String,
+    enum: ["low", "medium", "high", "critical"],
+    default: "high"
+  },
+  notes: {
+    type: String,
+    default: ""
+  },
+  assignedTo: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "Admin"
+  },
+  resolvedAt: {
+    type: Date
+  }
 }, { timestamps: true });
 
 export default mongoose.model("Panic", PanicSchema);

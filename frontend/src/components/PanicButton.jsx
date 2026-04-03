@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 
 function PanicButton({ currentLocation }) {
   const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
+  const PANIC_QUEUE_STORAGE_KEY = "pendingPanicQueue";
   const navigate = useNavigate();
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState("");
@@ -12,9 +13,27 @@ function PanicButton({ currentLocation }) {
   const [voiceSupported, setVoiceSupported] = useState(true);
   const [notifications, setNotifications] = useState([]);
   const [isSending, setIsSending] = useState(false);
+  const [pendingPanicCount, setPendingPanicCount] = useState(() => {
+    try {
+      const raw = localStorage.getItem("pendingPanicQueue");
+      const queue = raw ? JSON.parse(raw) : [];
+      return Array.isArray(queue) ? queue.length : 0;
+    } catch {
+      return 0;
+    }
+  });
   const [panicQuery, setPanicQuery] = useState("");
+  const [lastPanicRequest, setLastPanicRequest] = useState(() => {
+    try {
+      const raw = localStorage.getItem("lastPanicRequest");
+      return raw ? JSON.parse(raw) : null;
+    } catch {
+      return null;
+    }
+  });
   const videoRef = useRef(null);
   const streamRef = useRef(null);
+  const syncInProgressRef = useRef(false);
 
   const pushNotification = useCallback((message, tone = "info") => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -40,6 +59,226 @@ function PanicButton({ currentLocation }) {
       postcode: loc.postcode || "",
     };
   };
+
+  const readPendingQueue = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(PANIC_QUEUE_STORAGE_KEY);
+      const parsed = raw ? JSON.parse(raw) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }, [PANIC_QUEUE_STORAGE_KEY]);
+
+  const writePendingQueue = useCallback(
+    (queue) => {
+      try {
+        localStorage.setItem(PANIC_QUEUE_STORAGE_KEY, JSON.stringify(queue));
+        setPendingPanicCount(queue.length);
+        return true;
+      } catch (error) {
+        console.error("Failed to save pending panic queue:", error);
+        return false;
+      }
+    },
+    [PANIC_QUEUE_STORAGE_KEY]
+  );
+
+  const queuePanicRequest = useCallback(
+    (payload, photos = []) => {
+      const queue = readPendingQueue();
+      const queuedAt = new Date().toISOString();
+      const queuedItem = {
+        panicPayload: {
+          ...payload,
+          delivery_source: "offline_queue",
+          queued_at: queuedAt,
+        },
+        capturedPhotos: photos,
+        queuedAt,
+        attempts: 0,
+      };
+
+      queue.push(queuedItem);
+      const storedWithPhotos = writePendingQueue(queue);
+
+      // Fallback: if storage quota is hit due to large images, store only the panic payload.
+      if (!storedWithPhotos) {
+        queue[queue.length - 1] = {
+          ...queuedItem,
+          capturedPhotos: [],
+        };
+        writePendingQueue(queue);
+      }
+
+      return queue.length;
+    },
+    [readPendingQueue, writePendingQueue]
+  );
+
+  const updateLastPanicFromResponse = useCallback((result) => {
+    const savedPanic = result?.data;
+    if (!savedPanic?.panic_request_id) return;
+
+    const locationText = (savedPanic.locations || [])
+      .map((loc) => loc.detailed_address || [loc.city, loc.state].filter(Boolean).join(", "))
+      .filter(Boolean)
+      .join("; ");
+
+    const panicMeta = {
+      panicRequestId: savedPanic.panic_request_id,
+      panicQuery: savedPanic.panic_query || "",
+      createdAt: savedPanic.createdAt || new Date().toISOString(),
+      location: locationText,
+    };
+
+    setLastPanicRequest(panicMeta);
+    localStorage.setItem("lastPanicRequest", JSON.stringify(panicMeta));
+  }, []);
+
+  const sendPanicRequestToServer = useCallback(
+    async (panicPayload, capturedPhotos = []) => {
+      if (!navigator.onLine) {
+        return { status: "offline" };
+      }
+
+      const token = localStorage.getItem("token");
+      if (!token) {
+        return { status: "auth_missing" };
+      }
+
+      try {
+        if (capturedPhotos.length > 0) {
+          try {
+            const photoResponse = await fetch(`${API_BASE_URL}/api/digitalid/panic-photos`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                panic_request_id: panicPayload.panic_request_id,
+                email: panicPayload.email,
+                contact_number: panicPayload.contact_number,
+                panic_photos: capturedPhotos,
+              }),
+            });
+
+            if (!photoResponse.ok) {
+              const photoResult = await photoResponse.json().catch(() => ({}));
+              console.error("Failed to save panic photos:", photoResult || photoResponse.status);
+            }
+          } catch (photoError) {
+            console.error("Panic photo upload error:", photoError);
+            if (!navigator.onLine) {
+              return { status: "offline" };
+            }
+          }
+        }
+
+        const response = await fetch(`${API_BASE_URL}/api/digitalid/panic`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(panicPayload),
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (response.ok) {
+          return { status: "sent", result };
+        }
+
+        return {
+          status: "failed",
+          message: result?.error || result?.message || "Failed to send panic request",
+        };
+      } catch (error) {
+        console.error("Error sending panic request:", error);
+        if (!navigator.onLine) {
+          return { status: "offline" };
+        }
+        return {
+          status: "failed",
+          message: error?.message || "Unexpected error while sending panic request",
+        };
+      }
+    },
+    [API_BASE_URL]
+  );
+
+  const syncPendingPanicRequests = useCallback(async () => {
+    if (syncInProgressRef.current || !navigator.onLine) {
+      return;
+    }
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      return;
+    }
+
+    const queue = readPendingQueue();
+    if (queue.length === 0) {
+      return;
+    }
+
+    syncInProgressRef.current = true;
+    let syncedCount = 0;
+    const remaining = [];
+
+    try {
+      for (const item of queue) {
+        const panicPayload = item?.panicPayload
+          ? {
+              ...item.panicPayload,
+              delivery_source: "offline_queue",
+              queued_at: item?.queuedAt || item?.panicPayload?.queued_at || new Date().toISOString(),
+              synced_at: new Date().toISOString(),
+            }
+          : null;
+        const capturedPhotos = Array.isArray(item?.capturedPhotos) ? item.capturedPhotos : [];
+
+        if (!panicPayload) {
+          continue;
+        }
+
+        const sendResult = await sendPanicRequestToServer(panicPayload, capturedPhotos);
+
+        if (sendResult.status === "sent") {
+          syncedCount += 1;
+          updateLastPanicFromResponse(sendResult.result);
+          continue;
+        }
+
+        if (sendResult.status === "offline" || sendResult.status === "auth_missing") {
+          remaining.push({
+            ...item,
+            attempts: Number(item?.attempts || 0) + 1,
+            lastError: sendResult.status,
+          });
+          const pendingIndex = queue.indexOf(item);
+          remaining.push(...queue.slice(pendingIndex + 1));
+          break;
+        }
+
+        remaining.push({
+          ...item,
+          attempts: Number(item?.attempts || 0) + 1,
+          lastError: sendResult.message || "failed",
+        });
+      }
+
+      writePendingQueue(remaining);
+
+      if (syncedCount > 0) {
+        pushNotification(`Synced ${syncedCount} pending panic request(s).`, "success");
+      }
+    } finally {
+      syncInProgressRef.current = false;
+    }
+  }, [pushNotification, readPendingQueue, sendPanicRequestToServer, updateLastPanicFromResponse, writePendingQueue]);
 
   const stopCameraStream = () => {
     if (streamRef.current) {
@@ -113,17 +352,25 @@ function PanicButton({ currentLocation }) {
 
   const handlePanic = useCallback(async (voiceQueryOrEvent) => {
     console.log("🔴 Panic button clicked or voice command detected!");
+    console.log("🔴 Voice query:", voiceQueryOrEvent);
 
     const voiceQuery = typeof voiceQueryOrEvent === "string" ? voiceQueryOrEvent : "";
     const finalQuery = String(panicQuery || voiceQuery || transcript || "").trim();
+
+    console.log("🔴 Final query:", finalQuery);
+    console.log("🔴 Current location:", currentLocation);
 
     setIsSending(true);
     setTimeout(() => setIsSending(false), 4000);
 
     const capturedPhotos = voiceQuery ? [] : await capturePanicPhotos();
+    console.log("📸 Captured photos:", capturedPhotos.length);
 
     const digitalIdData = localStorage.getItem("digitalIdData");
+    console.log("💾 Raw digitalIdData from localStorage:", digitalIdData);
+
     if (!digitalIdData) {
+      console.error("❌ No digitalIdData found in localStorage!");
       alert("⚠️ create your Digital ID to access Panic Button");
       console.warn("⚠️ No digitalIdData found, redirecting...");
       navigate("/Profile");
@@ -131,7 +378,7 @@ function PanicButton({ currentLocation }) {
     }
 
     const parsedIdData = JSON.parse(digitalIdData);
-    console.log("👤 Digital ID data:", parsedIdData);
+    console.log("👤 Parsed digital ID data:", parsedIdData);
 
     const transformedLocation = transformLocation(currentLocation);
     console.log("📍 Transformed location:", transformedLocation);
@@ -145,11 +392,23 @@ function PanicButton({ currentLocation }) {
       })
     );
 
+    const panicRequestId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    console.log("👥 Transformed emergency contacts:", transformedContacts);
+
     const panicPayload = {
+      panic_request_id: panicRequestId,
       email : localStorage.getItem("email") || "",
       name: parsedIdData.name,
       contact_number: parsedIdData.contactInfo,
       panic_query: finalQuery,
+      delivery_source: "direct",
+      client_triggered_at: new Date().toISOString(),
+      queued_at: null,
+      synced_at: null,
       kyc: {
         aadhaar: { number: parsedIdData.aadhaarNumber || null },
         passport: {
@@ -162,57 +421,37 @@ function PanicButton({ currentLocation }) {
     };
 
     console.log("📦 Final panicPayload:", panicPayload);
+    console.log("🔑 Checking token...");
+
     const token = localStorage.getItem("token");
+    console.log("🔑 Token exists:", !!token);
+    console.log("🔑 Token value:", token ? token.substring(0, 20) + "..." : "null");
 
     try {
-      if (capturedPhotos.length > 0) {
-        try {
-          const photoResponse = await fetch(`${API_BASE_URL}/api/digitalid/panic-photos`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            body: JSON.stringify({
-              email: panicPayload.email,
-              contact_number: panicPayload.contact_number,
-              panic_photos: capturedPhotos,
-            }),
-          });
-
-          const photoResult = await photoResponse.json().catch(() => ({}));
-          if (!photoResponse.ok) {
-            console.error("❌ Failed to save panic photos:", photoResult || photoResponse.status);
-            pushNotification("Failed to save panic photos.", "error");
-          } else if (photoResult?.photoUrls?.length) {
-            console.log("Panic photo URLs:", photoResult.photoUrls);
-          }
-        } catch (photoError) {
-          console.error("❌ Panic photo upload error:", photoError);
-          pushNotification("Panic photo upload error.", "error");
-        }
-      }
-
       if (!token) {
+        console.error("❌ No token found in localStorage!");
         pushNotification("Please login to send panic request.", "warning");
         return;
       }
 
-      const response = await fetch(`${API_BASE_URL}/api/digitalid/panic`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,   // 🔑 attach token here
-        },
-        body: JSON.stringify(panicPayload),
-      });
+      if (!navigator.onLine) {
+        const queuedCount = queuePanicRequest(panicPayload, capturedPhotos);
+        pushNotification(
+          `No network. Panic request saved offline and queued (${queuedCount} pending).`,
+          "warning"
+        );
+        setPanicQuery("");
+        return;
+      }
 
-      const result = await response.json().catch(() => ({}));
+      const sendResult = await sendPanicRequestToServer(panicPayload, capturedPhotos);
 
-      if (response.ok) {
+      if (sendResult.status === "sent") {
+        const result = sendResult.result || {};
         console.log("🚨 Panic data sent successfully!");
         pushNotification("Panic request sent.", "success");
         setPanicQuery("");
+        updateLastPanicFromResponse(result);
 
         const smsStatus = result?.smsStatus;
         if (smsStatus === "sent") {
@@ -235,15 +474,49 @@ function PanicButton({ currentLocation }) {
         } else if (emailStatus === "not_configured") {
           pushNotification("Email service not configured.", "warning");
         }
+      } else if (sendResult.status === "offline") {
+        const queuedCount = queuePanicRequest(panicPayload, capturedPhotos);
+        pushNotification(
+          `Network dropped. Panic request queued and will auto-send (${queuedCount} pending).`,
+          "warning"
+        );
+        setPanicQuery("");
       } else {
-        console.error("❌ Failed to send panic data:", result || response.status);
-        pushNotification("Failed to send panic request.", "error");
+        console.error("❌ Failed to send panic data:", sendResult.message);
+        pushNotification(sendResult.message || "Failed to send panic request.", "error");
       }
     } catch (err) {
       console.error("⚠️ Error sending panic data:", err);
       pushNotification(`Error sending panic request: ${err.message}`, "error");
     }
-  }, [capturePanicPhotos, currentLocation, navigate, panicQuery, pushNotification, transcript]);
+  }, [
+    capturePanicPhotos,
+    currentLocation,
+    navigate,
+    panicQuery,
+    pushNotification,
+    queuePanicRequest,
+    sendPanicRequestToServer,
+    transcript,
+    updateLastPanicFromResponse,
+  ]);
+
+  useEffect(() => {
+    const onOnline = () => {
+      pushNotification("Network restored. Syncing pending panic requests...", "info");
+      syncPendingPanicRequests();
+    };
+
+    window.addEventListener("online", onOnline);
+
+    if (navigator.onLine) {
+      syncPendingPanicRequests();
+    }
+
+    return () => {
+      window.removeEventListener("online", onOnline);
+    };
+  }, [pushNotification, syncPendingPanicRequests]);
 
   // Initialize Web Speech API
   useEffect(() => {
@@ -322,6 +595,90 @@ function PanicButton({ currentLocation }) {
     }
   };
 
+  const handleShareLastPanic = async () => {
+    if (!lastPanicRequest) {
+      pushNotification("No panic request available to share.", "warning");
+      return;
+    }
+
+    const message = [
+      "PANIC ALERT DETAILS",
+      `Request ID: ${lastPanicRequest.panicRequestId}`,
+      `Created: ${new Date(lastPanicRequest.createdAt).toLocaleString()}`,
+      lastPanicRequest.panicQuery ? `Issue: ${lastPanicRequest.panicQuery}` : null,
+      lastPanicRequest.location ? `Location: ${lastPanicRequest.location}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: "Panic Request",
+          text: message,
+        });
+        pushNotification("Panic details shared.", "success");
+        return;
+      }
+
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(message);
+        pushNotification("Panic details copied to clipboard.", "success");
+        return;
+      }
+
+      pushNotification("Share is not supported on this browser.", "warning");
+    } catch (error) {
+      console.error("Share panic error:", error);
+      pushNotification("Failed to share panic details.", "error");
+    }
+  };
+
+  const handleDeleteLastPanic = async () => {
+    if (!lastPanicRequest?.panicRequestId) {
+      pushNotification("No panic request available to delete.", "warning");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "Delete your last panic request? This will also remove linked panic photos."
+    );
+
+    if (!confirmed) return;
+
+    const token = localStorage.getItem("token");
+    if (!token) {
+      pushNotification("Please login to delete panic request.", "warning");
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/api/digitalid/panic/${encodeURIComponent(lastPanicRequest.panicRequestId)}`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        pushNotification(result.error || "Failed to delete panic request.", "error");
+        return;
+      }
+
+      localStorage.removeItem("lastPanicRequest");
+      setLastPanicRequest(null);
+      pushNotification("Panic request deleted.", "success");
+    } catch (error) {
+      console.error("Delete panic error:", error);
+      pushNotification("Error deleting panic request.", "error");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4 items-start">
       <video ref={videoRef} className="hidden" playsInline muted />
@@ -365,6 +722,57 @@ function PanicButton({ currentLocation }) {
       />
 
       <div className="flex gap-4 items-center">
+        {/* Test Panic Button - Simple version for debugging */}
+        <motion.button
+          onClick={async () => {
+            console.log("🧪 Testing simple panic request...");
+            const token = localStorage.getItem("token");
+            const email = localStorage.getItem("email");
+
+            if (!token || !email) {
+              console.error("❌ Missing token or email");
+              return;
+            }
+
+            try {
+              const testPayload = {
+                email: email,
+                name: "Test User",
+                contact_number: "+919876543210",
+                panic_query: "Test panic from frontend",
+                kyc: { aadhaar: { number: null }, passport: { number: null, country: null } },
+                emergency_contacts: [],
+                locations: []
+              };
+
+              console.log("📦 Test payload:", testPayload);
+
+              const response = await fetch(`${API_BASE_URL}/api/digitalid/panic`, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify(testPayload),
+              });
+
+              const result = await response.json();
+              console.log("📡 Test response:", response.status, result);
+
+              if (response.ok) {
+                console.log("✅ Test panic saved successfully!");
+              } else {
+                console.error("❌ Test panic failed:", result);
+              }
+            } catch (error) {
+              console.error("❌ Test panic error:", error);
+            }
+          }}
+          className="px-6 py-3 bg-green-500 text-white font-bold rounded-xl shadow-lg hover:bg-green-600"
+        >
+          ✅ WORKING
+        </motion.button>
+
         {/* Panic Button */}
         <motion.button
           onClick={handlePanic}
@@ -403,6 +811,12 @@ function PanicButton({ currentLocation }) {
         )}
       </div>
 
+      {pendingPanicCount > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          {pendingPanicCount} panic request(s) are saved offline and waiting for network.
+        </div>
+      )}
+
       {/* Transcript Display */}
       {transcript && (
         <motion.div
@@ -412,6 +826,32 @@ function PanicButton({ currentLocation }) {
         >
           Heard: "{transcript}"
         </motion.div>
+      )}
+
+      {lastPanicRequest && (
+        <div className="w-full max-w-xl rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <p className="text-sm font-semibold text-gray-800">Last Panic Request</p>
+          <p className="mt-1 text-xs text-gray-600">
+            ID: {lastPanicRequest.panicRequestId}
+          </p>
+          <p className="text-xs text-gray-600">
+            Created: {new Date(lastPanicRequest.createdAt).toLocaleString()}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            <button
+              onClick={handleShareLastPanic}
+              className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700"
+            >
+              Share Panic
+            </button>
+            <button
+              onClick={handleDeleteLastPanic}
+              className="px-4 py-2 bg-red-600 text-white text-sm font-semibold rounded-lg hover:bg-red-700"
+            >
+              Delete Panic Request
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -135,6 +135,16 @@ export function createDigitalIdRouter(DigitalId) {
 
   // --- Routes (now attached to the router) ---
 
+  // 🔍 Health check endpoint
+  router.get("/health", async (req, res) => {
+    return res.status(200).json({
+      status: "ok",
+      message: "Panic API is reachable",
+      timestamp: new Date().toISOString(),
+      database: "connected",
+    });
+  });
+
   router.post("/digital-id", async (req, res) => {
     try {
       const newId = new DigitalId(req.body);
@@ -205,12 +215,15 @@ router.post("/panic-photos", async (req, res) => {
   try {
     const email = req.user?.email || req.body.email;
     const contactNumber = req.body.contact_number || req.body.contactNumber;
+    const panicRequestId = req.body.panic_request_id || req.body.panicRequestId;
     const incomingPhotos = Array.isArray(req.body.panic_photos)
       ? req.body.panic_photos.filter(Boolean).slice(0, 3)
       : [];
 
-    if (!email || !contactNumber) {
-      return res.status(400).json({ error: "Email and contact number are required" });
+    if (!email || !contactNumber || !panicRequestId) {
+      return res.status(400).json({
+        error: "Email, contact number, and panic_request_id are required",
+      });
     }
 
     if (!cloudinaryConfigured) {
@@ -243,6 +256,7 @@ router.post("/panic-photos", async (req, res) => {
     }
 
     const mediaRecord = new PanicMedia({
+      panic_request_id: panicRequestId,
       email,
       contact_number: contactNumber,
       photo_urls: photoUrls,
@@ -261,8 +275,33 @@ router.post("/panic-photos", async (req, res) => {
   }
 });
 
+// 🔍 Get panic photos (by panic_request_id, optionally by email)
+router.get("/panic-photos", async (req, res) => {
+  try {
+    const panicRequestId = req.query.panic_request_id || req.query.panicRequestId;
+    const email = req.query.email || req.user?.email;
+    const filter = {};
+    if (panicRequestId) {
+      filter.panic_request_id = panicRequestId;
+    } else if (email) {
+      filter.email = email;
+    }
+    const photos = await PanicMedia.find(filter).sort({ createdAt: -1 }).limit(100);
+    return res.status(200).json({
+      count: photos.length,
+      data: photos,
+    });
+  } catch (error) {
+    console.error("Error fetching panic photos:", error);
+    return res.status(500).json({ message: "Failed to fetch photos", error });
+  }
+});
+
 router.post("/panic", async (req, res) => {
   try {
+    console.log("🚨 [PANIC ENDPOINT] Received panic request from:", req.user?.email || req.body.email);
+    console.log("🚨 [PANIC ENDPOINT] Request body:", JSON.stringify(req.body, null, 2));
+    
     const panicData = { ...req.body, email: req.user?.email || req.body.email };
     delete panicData.panic_photos;
 
@@ -292,8 +331,10 @@ router.post("/panic", async (req, res) => {
       (locationSummary ? `\nLocation: ${locationSummary}` : "");
 
     // Create new panic record
+    console.log("🚨 [PANIC ENDPOINT] Saving panic record to MongoDB...");
     const newPanic = new Panic(panicData);
-    await newPanic.save();
+    const savedPanic = await newPanic.save();
+    console.log("✅ [PANIC ENDPOINT] Panic record saved with ID:", savedPanic._id);
 
     console.log("Twilio configured:", Boolean(twilioClient));
     console.log("TWILIO_FROM_NUMBER:", twilioFrom || "(missing)");
@@ -413,6 +454,79 @@ router.post("/panic", async (req, res) => {
   } catch (error) {
     console.error("Error saving panic data:", error);
     return res.status(500).json({ message: "Failed to process panic", error });
+  }
+});
+
+// 🔍 Get all panic requests (for debugging/admin)
+router.get("/panic", async (req, res) => {
+  try {
+    console.log("📊 Fetching all panic requests...");
+    const allPanics = await Panic.find().sort({ createdAt: -1 }).limit(50);
+    console.log(`✅ Found ${allPanics.length} panic records`);
+    return res.status(200).json({
+      count: allPanics.length,
+      data: allPanics,
+    });
+  } catch (error) {
+    console.error("Error fetching panic data:", error);
+    return res.status(500).json({ message: "Failed to fetch panic data", error });
+  }
+});
+
+// 🔍 Get panic requests by email
+router.get("/panic/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    console.log("📊 Fetching panic requests for email:", email);
+    const userPanics = await Panic.find({ email }).sort({ createdAt: -1 });
+    console.log(`✅ Found ${userPanics.length} panic records for ${email}`);
+    return res.status(200).json({
+      email,
+      count: userPanics.length,
+      data: userPanics,
+    });
+  } catch (error) {
+    console.error("Error fetching panic data by email:", error);
+    return res.status(500).json({ message: "Failed to fetch panic data", error });
+  }
+});
+
+// Delete a specific panic request for the logged-in user
+router.delete("/panic/:panicRequestId", async (req, res) => {
+  try {
+    const { panicRequestId } = req.params;
+    const requesterEmail = req.user?.email;
+
+    if (!requesterEmail) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+
+    if (!panicRequestId) {
+      return res.status(400).json({ error: "panicRequestId is required" });
+    }
+
+    const deletedPanic = await Panic.findOneAndDelete({
+      panic_request_id: panicRequestId,
+      email: requesterEmail,
+    });
+
+    if (!deletedPanic) {
+      return res.status(404).json({ error: "Panic request not found" });
+    }
+
+    const mediaDeleteResult = await PanicMedia.deleteMany({
+      panic_request_id: panicRequestId,
+      email: requesterEmail,
+    });
+
+    return res.status(200).json({
+      message: "Panic request deleted successfully",
+      deletedPanicId: deletedPanic._id,
+      deletedMediaCount: mediaDeleteResult.deletedCount || 0,
+    });
+  } catch (error) {
+    console.error("Error deleting panic request:", error);
+    return res.status(500).json({ message: "Failed to delete panic request", error });
   }
 });
 

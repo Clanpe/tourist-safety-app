@@ -15,6 +15,8 @@ import {
   createDigitalIdRouter,
   digitalIdSchema,
 } from "./DigitalidForm.js";
+import { createAdminRouter } from "./adminRoutes.js";
+import Admin from "./models/Admin.js";
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -327,7 +329,8 @@ const User = mongoose.model("User", userSchema);
 
 // ----------------- Auth Middleware -----------------
 const authMiddleware = (req, res, next) => {
-  if (req.baseUrl === "/api/digitalid" && req.path === "/panic-photos") {
+  // Allow panic-related endpoints and health check with or without auth (for emergency situations)
+  if (req.baseUrl === "/api/digitalid" && (req.path === "/panic-photos" || req.path === "/panic" || req.path === "/health")) {
     return next();
   }
 
@@ -622,6 +625,10 @@ Assistant reply: ${reply}
 // ----------------- Digital ID Route (Protected) -----------------
 const digitalIdRouter = createDigitalIdRouter(DigitalId);
 app.use("/api/digitalid", authMiddleware, digitalIdRouter);
+
+// ----------------- Admin Routes -----------------
+const adminRouter = createAdminRouter();
+app.use("/api/admin", adminRouter);
 
 app.get("/api/alerts", async (req, res) => {
   const lat = Number(req.query.lat);
